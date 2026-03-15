@@ -19,13 +19,11 @@ spec:
     namespace: smart-mobility-dev-cpp
   syncPolicy:
     automated:
-      prune: true
+      prune: false
       selfHeal: true
       allowEmpty: false
     syncOptions:
       - CreateNamespace=true
-      - PrunePropagationPolicy=foreground
-      - PruneLast=true
     retry:
       limit: 5
       backoff:

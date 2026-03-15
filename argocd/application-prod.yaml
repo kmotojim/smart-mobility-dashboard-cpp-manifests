@@ -24,8 +24,6 @@ spec:
       allowEmpty: false
     syncOptions:
       - CreateNamespace=true
-      - PrunePropagationPolicy=foreground
-      - PruneLast=true
     retry:
       limit: 5
       backoff:
