@@ -28,6 +28,8 @@ spec:
       kind: Deployment
     - group: route.openshift.io
       kind: Route
+    - group: batch
+      kind: Job
   roles:
     - name: developer
       description: Developer role
