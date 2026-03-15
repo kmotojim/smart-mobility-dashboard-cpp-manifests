@@ -11,4 +11,3 @@ resources:
   - backend-deployment.yaml
   - backend-service.yaml
   - backend-route.yaml
-  - e2e-test-job.yaml

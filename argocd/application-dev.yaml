@@ -3,6 +3,8 @@ kind: Application
 metadata:
   name: smart-mobility-dashboard-cpp-dev
   namespace: openshift-gitops
+  annotations:
+    notifications.argoproj.io/subscribe.on-sync-succeeded-e2e.e2e-tekton: ""
   labels:
     app.kubernetes.io/name: smart-mobility-dashboard-cpp
     environment: development
