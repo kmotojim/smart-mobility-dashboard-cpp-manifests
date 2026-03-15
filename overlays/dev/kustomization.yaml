@@ -21,10 +21,6 @@ patches:
       metadata:
         name: smart-mobility-cpp
 
-images:
-  - name: quay.io/rh_ee_kmotojim/smart-mobility-backend-cpp
-    newTag: "87d129251875531d764d4b118d2de1f82d510eca"
-
 replicas:
   - name: smart-mobility-backend-cpp
     count: 1
