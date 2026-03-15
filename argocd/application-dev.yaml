@@ -9,7 +9,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  project: default
+  project: smart-mobility-cpp
   source:
     repoURL: https://github.com/kmotojim/smart-mobility-dashboard-cpp-manifests.git
     targetRevision: main
