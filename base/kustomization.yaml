@@ -14,4 +14,4 @@ resources:
 
 images:
   - name: quay.io/rh_ee_kmotojim/smart-mobility-backend-cpp
-    newTag: "87d129251875531d764d4b118d2de1f82d510eca"
+    newTag: "49bd334fe89ec95d61182d8d4e2dc300416864e0"
