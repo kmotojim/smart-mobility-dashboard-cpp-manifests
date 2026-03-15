@@ -23,8 +23,7 @@ patches:
 
 images:
   - name: quay.io/rh_ee_kmotojim/smart-mobility-backend-cpp
-    newName: image-registry.openshift-image-registry.svc:5000/smart-mobility-dev-cpp/smart-mobility-backend-cpp
-    newTag: latest
+    newTag: "87d129251875531d764d4b118d2de1f82d510eca"
 
 replicas:
   - name: smart-mobility-backend-cpp
