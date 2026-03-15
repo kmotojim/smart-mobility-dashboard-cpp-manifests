@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: smart-mobility-cpp
+
+commonLabels:
+  app.kubernetes.io/managed-by: argocd
+
+resources:
+  - namespace.yaml
+  - backend-deployment.yaml
+  - backend-service.yaml
+  - backend-route.yaml
+  - e2e-test-job.yaml

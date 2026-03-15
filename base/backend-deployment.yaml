@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smart-mobility-backend-cpp
+  labels:
+    app.kubernetes.io/name: smart-mobility-backend-cpp
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: smart-mobility-cpp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: smart-mobility-backend-cpp
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: smart-mobility-backend-cpp
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: smart-mobility-cpp
+    spec:
+      containers:
+        - name: backend
+          image: quay.io/rh_ee_kmotojim/smart-mobility-backend-cpp:latest
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "5m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/vehicle/state
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3

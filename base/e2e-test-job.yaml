@@ -1,0 +1,148 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-test-job
+  labels:
+    app.kubernetes.io/name: e2e-test
+    app.kubernetes.io/component: test
+    app.kubernetes.io/part-of: smart-mobility-cpp
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: e2e-test
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: source
+          emptyDir: {}
+      initContainers:
+        - name: wait-for-app
+          image: registry.access.redhat.com/ubi8/ubi-minimal:8.9
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "=== Waiting for application to be ready ==="
+              
+              max_attempts=60
+              attempt=0
+              
+              echo "Waiting for backend service..."
+              while [ $attempt -lt $max_attempts ]; do
+                if curl -s -o /dev/null -w "%{http_code}" http://backend:8080/health | grep -q "200"; then
+                  echo "Backend is ready!"
+                  break
+                fi
+                attempt=$((attempt + 1))
+                echo "Attempt $attempt/$max_attempts - Backend not ready yet..."
+                sleep 5
+              done
+              
+              if [ $attempt -eq $max_attempts ]; then
+                echo "ERROR: Backend did not become ready in time"
+                exit 1
+              fi
+              
+              echo "Waiting for frontend (static files)..."
+              attempt=0
+              while [ $attempt -lt $max_attempts ]; do
+                if curl -s -o /dev/null -w "%{http_code}" http://backend:8080/ | grep -q "200"; then
+                  echo "Frontend is ready!"
+                  break
+                fi
+                attempt=$((attempt + 1))
+                echo "Attempt $attempt/$max_attempts - Frontend not ready yet..."
+                sleep 5
+              done
+              
+              if [ $attempt -eq $max_attempts ]; then
+                echo "ERROR: Frontend did not become ready in time"
+                exit 1
+              fi
+              
+              echo "=== All services are ready! ==="
+        - name: git-clone
+          image: docker.io/alpine/git:latest
+          volumeMounts:
+            - name: source
+              mountPath: /workspace
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Cloning repository..."
+              git clone --depth 1 https://github.com/kmotojim/smart-mobility-dashboard.git /workspace/repo
+              echo "Clone completed!"
+              ls -la /workspace/repo/e2e-tests/
+      containers:
+        - name: e2e-test
+          image: mcr.microsoft.com/playwright/java:v1.47.0-jammy
+          env:
+            - name: APP_URL
+              value: "http://backend:8080"
+            - name: HOME
+              value: "/workspace"
+            - name: MAVEN_OPTS
+              value: "-Dmaven.repo.local=/workspace/.m2/repository"
+          volumeMounts:
+            - name: source
+              mountPath: /workspace
+          workingDir: /workspace/repo/e2e-tests
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              
+              echo "=========================================="
+              echo "  E2E Test Execution (ArgoCD PostSync)"
+              echo "=========================================="
+              
+              echo ""
+              echo "=========================================="
+              echo "  Running E2E Tests"
+              echo "=========================================="
+              echo ""
+              
+              mvn test -Dapp.url=${APP_URL} -B
+              
+              TEST_EXIT_CODE=$?
+              
+              echo ""
+              echo "=========================================="
+              echo "  E2E Test Results"
+              echo "=========================================="
+              
+              if [ -f target/cucumber-reports/cucumber.html ]; then
+                echo "Cucumber HTML report generated: target/cucumber-reports/cucumber.html"
+              fi
+              
+              if [ $TEST_EXIT_CODE -eq 0 ]; then
+                echo ""
+                echo "All E2E tests passed!"
+                echo ""
+              else
+                echo ""
+                echo "Some E2E tests failed!"
+                echo ""
+                
+                if [ -d target/surefire-reports ]; then
+                  echo "=== Test Summary ==="
+                  cat target/surefire-reports/*.txt 2>/dev/null || true
+                fi
+              fi
+              
+              exit $TEST_EXIT_CODE
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "25m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"

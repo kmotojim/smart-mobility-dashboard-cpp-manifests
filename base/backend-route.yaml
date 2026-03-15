@@ -1,0 +1,19 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: smart-mobility-dashboard-cpp
+  labels:
+    app.kubernetes.io/name: smart-mobility-backend-cpp
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: smart-mobility-cpp
+spec:
+  to:
+    kind: Service
+    name: backend
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

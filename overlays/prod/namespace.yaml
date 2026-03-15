@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: smart-mobility-prod-cpp
+  labels:
+    app.kubernetes.io/name: smart-mobility-dashboard-cpp
+    app.kubernetes.io/part-of: smart-mobility-cpp
+    environment: production
