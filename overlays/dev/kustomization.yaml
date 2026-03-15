@@ -23,8 +23,8 @@ patches:
 
 images:
   - name: smart-mobility-backend-cpp
-    newName: image-registry.openshift-image-registry.svc:5000/smart-mobility-dev-cpp/backend-cpp
-    newTag: dev
+    newName: image-registry.openshift-image-registry.svc:5000/smart-mobility-dev-cpp/smart-mobility-backend-cpp
+    newTag: latest
 
 replicas:
   - name: smart-mobility-backend-cpp
