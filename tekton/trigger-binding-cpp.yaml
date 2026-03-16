@@ -1,0 +1,13 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: backend-ci-trigger-binding-cpp
+  namespace: smart-mobility-dev-cpp
+spec:
+  params:
+  - name: git-url
+    value: $(body.repository.clone_url)
+  - name: git-revision
+    value: $(body.after)
+  - name: git-branch
+    value: $(extensions.branch_name)

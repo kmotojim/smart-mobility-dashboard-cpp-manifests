@@ -1,0 +1,340 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: e2e-and-pr-pipeline
+  namespace: smart-mobility-dev-cpp
+spec:
+  description: |
+    ArgoCD sync 成功後に C++ E2E テストを実行し、成功時に develop → main へ PR を作成するパイプライン
+  params:
+  - name: APP_URL
+    description: デプロイされたアプリケーションの URL
+    type: string
+    default: "http://backend:8080"
+  - name: APP_REVISION
+    description: ArgoCD が sync したリビジョン (git commit SHA)
+    type: string
+    default: "develop"
+  - name: E2E_REPO_URL
+    description: E2E テストコードのリポジトリ URL
+    type: string
+    default: "https://github.com/kmotojim/smart-mobility-dashboard-c.git"
+  - name: MANIFESTS_REPO_OWNER
+    description: マニフェストリポジトリのオーナー
+    type: string
+    default: "kmotojim"
+  - name: MANIFESTS_REPO_NAME
+    description: マニフェストリポジトリ名
+    type: string
+    default: "smart-mobility-dashboard-cpp-manifests"
+  tasks:
+  - name: wait-for-app
+    taskSpec:
+      params:
+      - name: APP_URL
+        type: string
+      steps:
+      - name: wait-healthy
+        image: registry.access.redhat.com/ubi8/ubi-minimal:8.9
+        script: |
+          #!/usr/bin/env bash
+          set -e
+          echo "=== Waiting for application to be ready ==="
+
+          max_attempts=60
+          attempt=0
+
+          echo "Checking backend health at $(params.APP_URL)/health ..."
+          while [ $attempt -lt $max_attempts ]; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$(params.APP_URL)/health" 2>/dev/null || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "Backend is healthy!"
+              break
+            fi
+            attempt=$((attempt + 1))
+            echo "Attempt $attempt/$max_attempts - status=$status"
+            sleep 5
+          done
+
+          if [ $attempt -eq $max_attempts ]; then
+            echo "ERROR: Application did not become healthy in time"
+            exit 1
+          fi
+
+          echo "Checking static files at $(params.APP_URL)/ ..."
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$(params.APP_URL)/" 2>/dev/null || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "Static files are served!"
+              break
+            fi
+            attempt=$((attempt + 1))
+            echo "Attempt $attempt/$max_attempts - status=$status"
+            sleep 5
+          done
+
+          if [ $attempt -eq $max_attempts ]; then
+            echo "ERROR: Static files not available"
+            exit 1
+          fi
+
+          echo "=== Application is ready! ==="
+      params:
+      - name: APP_URL
+        type: string
+    params:
+    - name: APP_URL
+      value: $(params.APP_URL)
+  - name: git-clone-e2e
+    runAfter:
+    - wait-for-app
+    taskRef:
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: git-clone
+      - name: namespace
+        value: openshift-pipelines
+      resolver: cluster
+    params:
+    - name: URL
+      value: $(params.E2E_REPO_URL)
+    - name: REVISION
+      value: main
+    - name: DELETE_EXISTING
+      value: "true"
+    - name: SUBDIRECTORY
+      value: e2e-repo
+    workspaces:
+    - name: output
+      workspace: workspace
+  - name: run-e2e-tests
+    runAfter:
+    - git-clone-e2e
+    taskSpec:
+      params:
+      - name: APP_URL
+        type: string
+      sidecars:
+      - name: chromedriver
+        image: selenium/standalone-chromium:latest
+        env:
+        - name: SE_START_VNC
+          value: "false"
+      steps:
+      - name: build-e2e
+        image: image-registry.openshift-image-registry.svc:5000/cluster-admin-devspaces/udi-cpp-dev:latest
+        workingDir: $(workspaces.source.path)/e2e-repo
+        script: |
+          #!/usr/bin/env bash
+          set -e
+
+          echo "=========================================="
+          echo "  Building C++ E2E Tests"
+          echo "=========================================="
+
+          mkdir -p build-e2e && cd build-e2e
+          cmake -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release ..
+          cmake --build . --target DashboardE2ETest --parallel $(nproc)
+
+          echo ""
+          echo "=== E2E test binary built ==="
+          ls -la DashboardE2ETest
+      - name: run-tests
+        image: image-registry.openshift-image-registry.svc:5000/cluster-admin-devspaces/udi-cpp-dev:latest
+        env:
+        - name: APP_URL
+          value: $(params.APP_URL)
+        - name: CHROMEDRIVER_HOST
+          value: "127.0.0.1"
+        - name: CHROMEDRIVER_PORT
+          value: "4444"
+        workingDir: $(workspaces.source.path)/e2e-repo
+        script: |
+          #!/usr/bin/env bash
+          set -e
+
+          echo "=========================================="
+          echo "  Running C++ E2E Tests"
+          echo "=========================================="
+
+          # ChromeDriver (Selenium Standalone) の起動を待つ
+          echo "Waiting for ChromeDriver on ${CHROMEDRIVER_HOST}:${CHROMEDRIVER_PORT} ..."
+          max_attempts=30
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            if curl -s "http://${CHROMEDRIVER_HOST}:${CHROMEDRIVER_PORT}/status" 2>/dev/null | grep -q '"ready"'; then
+              echo "ChromeDriver is ready!"
+              break
+            fi
+            attempt=$((attempt + 1))
+            echo "Attempt $attempt/$max_attempts ..."
+            sleep 2
+          done
+
+          if [ $attempt -eq $max_attempts ]; then
+            echo "ERROR: ChromeDriver did not become ready"
+            exit 1
+          fi
+
+          # E2E テスト実行
+          ./build-e2e/DashboardE2ETest 2>&1 | tee /tmp/e2e-output.log
+          TEST_EXIT=$?
+
+          echo ""
+          echo "=========================================="
+          echo "  E2E Tests Completed (exit=$TEST_EXIT)"
+          echo "=========================================="
+
+          # テスト結果サマリを生成
+          SUMMARY_FILE=$(workspaces.source.path)/e2e-summary.txt
+          PASSED=$(grep -c "\[  PASSED  \]" /tmp/e2e-output.log || echo "0")
+          FAILED=$(grep -c "\[  FAILED  \]" /tmp/e2e-output.log || echo "0")
+
+          echo "## E2E Test Results (C++)" > "$SUMMARY_FILE"
+          echo "" >> "$SUMMARY_FILE"
+          if [ $TEST_EXIT -eq 0 ]; then
+            echo "- **Status**: PASSED" >> "$SUMMARY_FILE"
+          else
+            echo "- **Status**: FAILED" >> "$SUMMARY_FILE"
+          fi
+          echo "- **Passed**: ${PASSED}" >> "$SUMMARY_FILE"
+          echo "- **Failed**: ${FAILED}" >> "$SUMMARY_FILE"
+          echo "- **App URL**: ${APP_URL}" >> "$SUMMARY_FILE"
+          echo "- **Date**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$SUMMARY_FILE"
+          echo "" >> "$SUMMARY_FILE"
+          echo '```' >> "$SUMMARY_FILE"
+          grep -E "^\[" /tmp/e2e-output.log >> "$SUMMARY_FILE" 2>/dev/null || true
+          echo '```' >> "$SUMMARY_FILE"
+
+          exit $TEST_EXIT
+        computeResources:
+          requests:
+            memory: "256Mi"
+            cpu: "25m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      params:
+      - name: APP_URL
+        type: string
+      workspaces:
+      - name: source
+    params:
+    - name: APP_URL
+      value: $(params.APP_URL)
+    workspaces:
+    - name: source
+      workspace: workspace
+  - name: create-pr
+    runAfter:
+    - run-e2e-tests
+    taskSpec:
+      params:
+      - name: MANIFESTS_REPO_OWNER
+        type: string
+      - name: MANIFESTS_REPO_NAME
+        type: string
+      - name: APP_REVISION
+        type: string
+      steps:
+      - name: create-pull-request
+        image: registry.access.redhat.com/ubi8/ubi:8.9
+        env:
+        - name: GH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: github-token
+              key: token
+        workingDir: $(workspaces.source.path)
+        script: |
+          #!/usr/bin/env bash
+          set -e
+
+          echo "=========================================="
+          echo "  Create Pull Request: develop → main"
+          echo "=========================================="
+
+          OWNER="$(params.MANIFESTS_REPO_OWNER)"
+          REPO="$(params.MANIFESTS_REPO_NAME)"
+          REVISION="$(params.APP_REVISION)"
+
+          curl -sL https://github.com/cli/cli/releases/download/v2.65.0/gh_2.65.0_linux_amd64.tar.gz | tar xz
+          export PATH="$PWD/gh_2.65.0_linux_amd64/bin:$PATH"
+
+          SUMMARY=""
+          if [ -f e2e-summary.txt ]; then
+            SUMMARY=$(cat e2e-summary.txt)
+          fi
+
+          PR_TITLE="Promote develop to main (rev: ${REVISION:0:8})"
+          PR_BODY=$(cat <<PREOF
+          ## Auto-generated Promotion PR
+
+          ArgoCD sync 後の E2E テストが成功したため、develop → main への昇格 PR を自動作成しました。
+
+          **Manifests Revision**: \`${REVISION}\`
+
+          ${SUMMARY}
+
+          ---
+          *This PR was automatically created by the e2e-and-pr-pipeline.*
+          PREOF
+          )
+
+          DIFF_COUNT=$(gh api "repos/${OWNER}/${REPO}/compare/main...develop" --jq '.ahead_by' 2>/dev/null || echo "0")
+
+          if [ "$DIFF_COUNT" = "0" ] || [ -z "$DIFF_COUNT" ]; then
+            echo "No commits between develop and main. Nothing to promote."
+            echo "PR creation skipped (branches are already in sync)."
+          else
+            echo "Found ${DIFF_COUNT} commit(s) ahead of main."
+
+            EXISTING_PR=$(gh pr list --repo "${OWNER}/${REPO}" --head develop --base main --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+            if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
+              echo "Existing PR #${EXISTING_PR} found. Updating..."
+              gh pr comment "${EXISTING_PR}" \
+                --repo "${OWNER}/${REPO}" \
+                --body "${PR_BODY}"
+              echo "PR #${EXISTING_PR} updated with new test results."
+            else
+              echo "Creating new PR..."
+              gh pr create \
+                --repo "${OWNER}/${REPO}" \
+                --title "${PR_TITLE}" \
+                --body "${PR_BODY}" \
+                --base main \
+                --head develop
+              echo "PR created successfully!"
+            fi
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "  PR Operation Complete"
+          echo "=========================================="
+      params:
+      - name: MANIFESTS_REPO_OWNER
+        type: string
+      - name: MANIFESTS_REPO_NAME
+        type: string
+      - name: APP_REVISION
+        type: string
+      workspaces:
+      - name: source
+    params:
+    - name: MANIFESTS_REPO_OWNER
+      value: $(params.MANIFESTS_REPO_OWNER)
+    - name: MANIFESTS_REPO_NAME
+      value: $(params.MANIFESTS_REPO_NAME)
+    - name: APP_REVISION
+      value: $(params.APP_REVISION)
+    workspaces:
+    - name: source
+      workspace: workspace
+  workspaces:
+  - name: workspace
+    description: E2E テストコードとテスト結果を格納するワークスペース

@@ -13,5 +13,5 @@ resources:
   - backend-route.yaml
 
 images:
-  - name: quay.io/rh_ee_kmotojim/smart-mobility-backend-cpp
+  - name: quay.io/example_kmotojim/smart-mobility-backend-cpp
     newTag: "f7c8d6c25f077e98bf6c0bef3902e54cd854d5aa"

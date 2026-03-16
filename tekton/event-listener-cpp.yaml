@@ -1,0 +1,95 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tekton-triggers-sa
+  namespace: smart-mobility-dev-cpp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tekton-triggers-eventlistener-binding
+  namespace: smart-mobility-dev-cpp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tekton-triggers-eventlistener-roles
+subjects:
+- kind: ServiceAccount
+  name: tekton-triggers-sa
+  namespace: smart-mobility-dev-cpp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tekton-triggers-cpp-clusterbinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tekton-triggers-eventlistener-clusterroles
+subjects:
+- kind: ServiceAccount
+  name: tekton-triggers-sa
+  namespace: smart-mobility-dev-cpp
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: backend-ci-event-listener-cpp
+  namespace: smart-mobility-dev-cpp
+spec:
+  serviceAccountName: tekton-triggers-sa
+  triggers:
+  - name: github-push-trigger
+    interceptors:
+    - ref:
+        name: "github"
+      params:
+      - name: "secretRef"
+        value:
+          secretName: github-webhook-secret
+          secretKey: secret
+      - name: "eventTypes"
+        value:
+          - "push"
+    - ref:
+        name: "cel"
+      params:
+      - name: "filter"
+        value: "body.ref.startsWith('refs/heads/')"
+      - name: "overlays"
+        value:
+        - key: branch_name
+          expression: "body.ref.split('/')[2]"
+    bindings:
+    - ref: backend-ci-trigger-binding-cpp
+    template:
+      ref: backend-ci-trigger-template-cpp
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-webhook-secret
+  namespace: smart-mobility-dev-cpp
+type: Opaque
+stringData:
+  secret: <REPLACE_WITH_YOUR_WEBHOOK_SECRET>
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: backend-ci-event-listener-cpp
+  namespace: smart-mobility-dev-cpp
+  labels:
+    app.kubernetes.io/managed-by: EventListener
+    app.kubernetes.io/part-of: Triggers
+    eventlistener: backend-ci-event-listener-cpp
+spec:
+  port:
+    targetPort: http-listener
+  to:
+    kind: Service
+    name: el-backend-ci-event-listener-cpp
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

@@ -1,0 +1,33 @@
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: e2e-and-pr-event-listener
+  namespace: smart-mobility-dev-cpp
+spec:
+  serviceAccountName: tekton-triggers-sa
+  triggers:
+  - name: argocd-sync-trigger
+    bindings:
+    - ref: e2e-and-pr-trigger-binding
+    template:
+      ref: e2e-and-pr-trigger-template
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: e2e-and-pr-event-listener
+  namespace: smart-mobility-dev-cpp
+  labels:
+    app.kubernetes.io/managed-by: EventListener
+    app.kubernetes.io/part-of: Triggers
+    eventlistener: e2e-and-pr-event-listener
+spec:
+  port:
+    targetPort: http-listener
+  to:
+    kind: Service
+    name: el-e2e-and-pr-event-listener
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
