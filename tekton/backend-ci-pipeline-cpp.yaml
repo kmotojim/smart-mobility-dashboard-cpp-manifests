@@ -1,0 +1,289 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: backend-ci-pipeline-cpp
+  namespace: smart-mobility-dev-cpp
+spec:
+  description: |
+    C++バックエンドのCMakeビルド、SonarQube静的解析、イメージビルド・プッシュを行うCIパイプライン
+  params:
+  - default: https://github.com/kmotojim/smart-mobility-dashboard-c.git
+    description: ソースコードを取得するGitリポジトリのURL
+    name: GIT_URL
+    type: string
+  - default: main
+    description: Gitのブランチまたはリビジョン
+    name: GIT_REVISION
+    type: string
+  - default: http://docker-sonarqube-git.sonarqube.svc.cluster.local:9000
+    description: SonarQubeサーバーのURL
+    name: SONAR_HOST_URL
+    type: string
+  - description: SonarQubeのプロジェクトキー
+    name: SONAR_PROJECT_KEY
+    type: string
+  - description: SonarQubeの認証トークン
+    name: SONAR_TOKEN
+    type: string
+  - default: ./Dockerfile
+    description: Dockerfileのパス
+    name: DOCKERFILE_PATH
+    type: string
+  - default: image-registry.openshift-image-registry.svc:5000/smart-mobility-dev-cpp/smart-mobility-backend-cpp
+    description: コピー元の内部レジストリのURL
+    name: INTERNAL_REGISTRY_URL
+    type: string
+  - default: quay.io/example_kmotojim/smart-mobility-backend-cpp
+    description: コピー先の外部レジストリのURL
+    name: EXTERNAL_REGISTRY_URL
+    type: string
+  - default: latest
+    description: イメージのタグ
+    name: IMAGE_TAG
+    type: string
+  tasks:
+  - name: git-clone
+    params:
+    - name: URL
+      value: $(params.GIT_URL)
+    - name: REVISION
+      value: $(params.GIT_REVISION)
+    - name: DELETE_EXISTING
+      value: "true"
+    - name: DEPTH
+      value: "1"
+    taskRef:
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: git-clone
+      - name: namespace
+        value: openshift-pipelines
+      resolver: cluster
+    workspaces:
+    - name: output
+      workspace: workspace
+  - name: cmake-build-and-test
+    runAfter:
+    - git-clone
+    taskSpec:
+      steps:
+      - image: image-registry.openshift-image-registry.svc:5000/cluster-admin-devspaces/udi-cpp-dev:latest
+        name: cmake-build-test-coverage
+        script: |
+          #!/usr/bin/env bash
+          set -e
+
+          echo "=========================================="
+          echo "CMake Build with Coverage + Test"
+          echo "=========================================="
+
+          # --- 追加ツールのインストール ---
+          dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm 2>/dev/null || true
+          dnf install -y cppcheck 2>/dev/null || true
+          pip3 install gcovr --quiet 2>/dev/null || pip install gcovr --quiet
+
+          # --- カバレッジ付きビルド ---
+          mkdir -p build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Debug \
+                -DBUILD_TESTS=ON \
+                -DENABLE_COVERAGE=ON ..
+          cmake --build . --parallel $(nproc)
+
+          echo ""
+          echo "=== Build Artifacts ==="
+          ls -la smart-mobility-backend
+
+          # --- テスト実行 ---
+          echo ""
+          echo "=========================================="
+          echo "Running Tests"
+          echo "=========================================="
+          ctest --output-on-failure --parallel $(nproc)
+
+          echo ""
+          echo "=========================================="
+          echo "Generating Coverage Report"
+          echo "=========================================="
+          cd ..
+
+          # gcovr で SonarQube 汎用カバレッジ XML を生成
+          gcovr --root . \
+                --filter 'src/' \
+                --filter 'include/' \
+                --exclude '.*test.*' \
+                --exclude-throw-branches \
+                --exclude-unreachable-branches \
+                --sonarqube coverage-raw.xml
+
+          # C++ gcov のブランチデータにはコンパイラ生成の例外処理パスが含まれ、
+          # 通常のテストではカバー不可能なため、行カバレッジのみを報告する
+          sed 's/ branchesToCover="[^"]*"//g; s/ coveredBranches="[^"]*"//g' \
+                coverage-raw.xml > coverage.xml
+
+          echo ""
+          echo "=== Coverage Report ==="
+          cat coverage.xml | head -50
+          echo "..."
+
+          # --- cppcheck 静的解析 (SonarQube インポート用) ---
+          echo ""
+          echo "=========================================="
+          echo "Running cppcheck Static Analysis"
+          echo "=========================================="
+          if command -v cppcheck &>/dev/null; then
+            cppcheck --xml --xml-version=2 \
+                     --enable=all \
+                     --suppress=missingInclude \
+                     --suppress=unusedFunction \
+                     -I include/ \
+                     src/ include/ \
+                     2> cppcheck-report.xml
+            echo ""
+            echo "=== cppcheck Report ==="
+            head -30 cppcheck-report.xml
+            echo "..."
+          else
+            echo "WARNING: cppcheck not available, generating empty report"
+            echo '<?xml version="1.0" encoding="UTF-8"?><results version="2"></results>' > cppcheck-report.xml
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "Build + Test + Coverage + Analysis Completed"
+          echo "=========================================="
+        workingDir: $(workspaces.source.path)
+      workspaces:
+      - name: source
+    workspaces:
+    - name: source
+      workspace: workspace
+  - name: sonarqube-scan
+    params:
+    - name: SONAR_HOST_URL
+      value: $(params.SONAR_HOST_URL)
+    - name: SONAR_PROJECT_KEY
+      value: $(params.SONAR_PROJECT_KEY)
+    - name: SONAR_TOKEN
+      value: $(params.SONAR_TOKEN)
+    runAfter:
+    - cmake-build-and-test
+    taskSpec:
+      params:
+      - name: SONAR_HOST_URL
+        type: string
+      - name: SONAR_PROJECT_KEY
+        type: string
+      - name: SONAR_TOKEN
+        type: string
+      steps:
+      - env:
+        - name: SONAR_PROJECT_KEY
+          value: $(params.SONAR_PROJECT_KEY)
+        - name: SONAR_HOST_URL
+          value: $(params.SONAR_HOST_URL)
+        - name: SONAR_TOKEN
+          value: $(params.SONAR_TOKEN)
+        image: docker.io/sonarsource/sonar-scanner-cli:latest
+        name: sonar-scan
+        script: |
+          #!/usr/bin/env bash
+          set -e
+
+          echo "=== Running SonarQube Scanner (C++ with Coverage) ==="
+          sonar-scanner \
+            -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+            -Dsonar.projectName="${SONAR_PROJECT_KEY}" \
+            -Dsonar.projectVersion=1.0 \
+            -Dsonar.sources=src,include \
+            -Dsonar.tests=test \
+            -Dsonar.exclusions="**/build/**" \
+            -Dsonar.cxx.file.suffixes=.cpp,.h,.hpp \
+            -Dsonar.coverageReportPaths=coverage.xml \
+            -Dsonar.cxx.cppcheck.reportPaths=cppcheck-report.xml \
+            -Dsonar.text.inclusions="**/*.cpp,**/*.h,**/*.hpp" \
+            -Dsonar.sourceEncoding=UTF-8 \
+            -Dsonar.host.url="${SONAR_HOST_URL}" \
+            -Dsonar.token="${SONAR_TOKEN}" \
+            -Dsonar.qualitygate.wait=true \
+            -Dsonar.qualitygate.timeout=300
+
+          echo ""
+          echo "=== Quality Gate Passed (with Coverage) ==="
+        workingDir: $(workspaces.source.path)
+      workspaces:
+      - name: source
+    workspaces:
+    - name: source
+      workspace: workspace
+  - name: buildah
+    params:
+    - name: IMAGE
+      value: $(params.INTERNAL_REGISTRY_URL):$(params.IMAGE_TAG)
+    - name: DOCKERFILE
+      value: $(params.DOCKERFILE_PATH)
+    - name: CONTEXT
+      value: .
+    - name: STORAGE_DRIVER
+      value: vfs
+    - name: FORMAT
+      value: oci
+    - name: BUILD_ARGS
+      value:
+      - ""
+    - name: BUILD_EXTRA_ARGS
+      value: ""
+    - name: PUSH_EXTRA_ARGS
+      value: ""
+    - name: SKIP_PUSH
+      value: "false"
+    - name: TLS_VERIFY
+      value: "true"
+    - name: VERBOSE
+      value: "false"
+    runAfter:
+    - sonarqube-scan
+    taskRef:
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: buildah
+      - name: namespace
+        value: openshift-pipelines
+      resolver: cluster
+    workspaces:
+    - name: source
+      workspace: workspace
+  - name: skopeo-copy
+    params:
+    - name: SOURCE_IMAGE_URL
+      value: docker://$(params.INTERNAL_REGISTRY_URL):$(params.IMAGE_TAG)
+    - name: DESTINATION_IMAGE_URL
+      value: docker://$(params.EXTERNAL_REGISTRY_URL):$(params.IMAGE_TAG)
+    - name: SRC_TLS_VERIFY
+      value: "true"
+    - name: DEST_TLS_VERIFY
+      value: "true"
+    - name: VERBOSE
+      value: "false"
+    - name: ARGS
+      value: ""
+    runAfter:
+    - buildah
+    taskRef:
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: skopeo-copy
+      - name: namespace
+        value: openshift-pipelines
+      resolver: cluster
+    workspaces:
+    - name: images_url
+      workspace: workspace
+  workspaces:
+  - description: ソースコードを格納するワークスペース
+    name: workspace

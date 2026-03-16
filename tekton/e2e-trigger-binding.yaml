@@ -1,0 +1,9 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: e2e-and-pr-trigger-binding
+  namespace: smart-mobility-dev-cpp
+spec:
+  params:
+  - name: app-revision
+    value: $(body.revision)

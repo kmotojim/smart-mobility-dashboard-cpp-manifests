@@ -1,0 +1,58 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: backend-ci-trigger-template-cpp
+  namespace: smart-mobility-dev-cpp
+spec:
+  params:
+  - name: git-url
+    description: ソースコードを取得するGitリポジトリのURL
+    default: https://github.com/kmotojim/smart-mobility-dashboard-c.git
+  - name: git-revision
+    description: Gitのコミットリビジョン
+    default: main
+  - name: git-branch
+    description: Gitのブランチ名
+    default: main
+  resourcetemplates:
+  - apiVersion: tekton.dev/v1
+    kind: PipelineRun
+    metadata:
+      generateName: backend-ci-pipeline-cpp-run-
+      namespace: smart-mobility-dev-cpp
+      labels:
+        tekton.dev/pipeline: backend-ci-pipeline-cpp
+        triggers.tekton.dev/trigger: backend-ci-trigger-cpp
+    spec:
+      pipelineRef:
+        name: backend-ci-pipeline-cpp
+      params:
+      - name: GIT_URL
+        value: $(tt.params.git-url)
+      - name: GIT_REVISION
+        value: $(tt.params.git-revision)
+      - name: SONAR_HOST_URL
+        value: http://docker-sonarqube-git.sonarqube.svc.cluster.local:9000
+      - name: SONAR_PROJECT_KEY
+        value: smart-mobility-dashboard-cpp
+      - name: SONAR_TOKEN
+        value: <REPLACE_WITH_SONAR_TOKEN>
+      - name: DOCKERFILE_PATH
+        value: ./Dockerfile
+      - name: INTERNAL_REGISTRY_URL
+        value: image-registry.openshift-image-registry.svc:5000/smart-mobility-dev-cpp/smart-mobility-backend-cpp
+      - name: EXTERNAL_REGISTRY_URL
+        value: quay.io/example_kmotojim/smart-mobility-backend-cpp
+      - name: IMAGE_TAG
+        value: $(tt.params.git-revision)
+      workspaces:
+      - name: workspace
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+      timeouts:
+        pipeline: 30m

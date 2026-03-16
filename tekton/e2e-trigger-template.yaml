@@ -1,0 +1,44 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: e2e-and-pr-trigger-template
+  namespace: smart-mobility-dev-cpp
+spec:
+  params:
+  - name: app-revision
+    description: ArgoCD が sync したリビジョン
+    default: develop
+  resourcetemplates:
+  - apiVersion: tekton.dev/v1
+    kind: PipelineRun
+    metadata:
+      generateName: e2e-and-pr-run-
+      namespace: smart-mobility-dev-cpp
+      labels:
+        tekton.dev/pipeline: e2e-and-pr-pipeline
+        triggers.tekton.dev/trigger: argocd-sync-trigger
+    spec:
+      pipelineRef:
+        name: e2e-and-pr-pipeline
+      params:
+      - name: APP_URL
+        value: "http://backend:8080"
+      - name: APP_REVISION
+        value: $(tt.params.app-revision)
+      - name: E2E_REPO_URL
+        value: "https://github.com/kmotojim/smart-mobility-dashboard-c.git"
+      - name: MANIFESTS_REPO_OWNER
+        value: "kmotojim"
+      - name: MANIFESTS_REPO_NAME
+        value: "smart-mobility-dashboard-cpp-manifests"
+      workspaces:
+      - name: workspace
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: 1Gi
+      timeouts:
+        pipeline: 30m
