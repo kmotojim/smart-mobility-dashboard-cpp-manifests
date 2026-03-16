@@ -21,6 +21,15 @@ smart-mobility-dashboard-cpp-manifests/
 │   ├── backend-service.yaml
 │   ├── backend-route.yaml
 │   └── e2e-test-job.yaml      # E2Eテスト（ArgoCD Post-Sync Hook）
+├── tekton/                    # Tekton CI/CDパイプライン定義
+│   ├── backend-ci-pipeline-cpp.yaml   # CIパイプライン（ビルド・テスト・SonarQube・イメージプッシュ）
+│   ├── event-listener-cpp.yaml        # GitHub Webhook EventListener + RBAC
+│   ├── trigger-binding-cpp.yaml       # CI用 TriggerBinding
+│   ├── trigger-template-cpp.yaml      # CI用 TriggerTemplate
+│   ├── e2e-and-pr-pipeline.yaml       # E2Eテスト + PR作成パイプライン
+│   ├── e2e-event-listener.yaml        # ArgoCD Sync EventListener
+│   ├── e2e-trigger-binding.yaml       # E2E用 TriggerBinding
+│   └── e2e-trigger-template.yaml      # E2E用 TriggerTemplate
 └── overlays/                  # 環境別オーバーレイ
     ├── dev/                   # 開発環境
     │   └── kustomization.yaml
@@ -197,12 +206,226 @@ oc apply -f argocd/
 
 ---
 
+## Tekton CI/CD パイプライン
+
+本リポジトリの `tekton/` ディレクトリには、ソースコードリポジトリ（smart-mobility-dashboard-c）のCI/CDを実現するTektonパイプライン定義が含まれます。
+
+### 前提条件（Tekton）
+
+#### クラスタにインストール済みであること
+
+| コンポーネント | 説明 | 確認コマンド |
+|---------------|------|-------------|
+| OpenShift Pipelines (Tekton) | パイプライン実行基盤。ClusterTask（`git-clone`, `buildah`, `skopeo-copy`）を提供 | `oc get pods -n openshift-pipelines` |
+| Tekton Triggers | EventListener / TriggerBinding / TriggerTemplate の実行基盤。ClusterRole（`tekton-triggers-eventlistener-roles`, `tekton-triggers-eventlistener-clusterroles`）を提供 | `oc get pods -n openshift-pipelines -l app=tekton-triggers` |
+
+#### tekton/ 内で定義済みのリソース
+
+以下のリソースは `tekton/event-listener-cpp.yaml` 内に含まれており、`oc apply -f tekton/` で自動作成されます。
+
+| 種類 | 名前 | 説明 |
+|------|------|------|
+| ServiceAccount | `tekton-triggers-sa` | EventListener用のサービスアカウント |
+| RoleBinding | `tekton-triggers-eventlistener-binding` | EventListenerのNamespaceスコープ権限 |
+| ClusterRoleBinding | `tekton-triggers-cpp-clusterbinding` | EventListenerのクラスタスコープ権限 |
+| Secret | `github-webhook-secret` | GitHub Webhookの署名検証用シークレット |
+
+#### 事前に手動作成が必要なリソース
+
+以下のリソースはパイプラインから参照されますが、マニフェストには含まれていないため手動で作成してください。
+
+| 種類 | 名前 | Namespace | 用途 | 作成例 |
+|------|------|-----------|------|--------|
+| Secret | `github-token` | `smart-mobility-dev-cpp` | E2Eテスト成功時のPR自動作成（`gh` CLI用） | 下記参照 |
+
+```bash
+# GitHub Personal Access Token（repo権限が必要）
+oc create secret generic github-token \
+  --from-literal=token=ghp_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
+  -n smart-mobility-dev-cpp
+```
+
+#### pipeline ServiceAccount の権限設定
+
+Tekton PipelineRunはデフォルトで `pipeline` ServiceAccountを使用します。以下の権限が必要です。
+
+**内部レジストリへのプッシュ権限（buildahタスク）:**
+```bash
+# pipeline SAに内部レジストリへのpush権限を付与
+oc policy add-role-to-user system:image-builder system:serviceaccount:smart-mobility-dev-cpp:pipeline -n smart-mobility-dev-cpp
+```
+
+**外部レジストリ（Quay.io）の認証情報（skopeo-copyタスク）:**
+```bash
+# Quay.ioのdockerconfigjsonをpipeline SAにリンク
+oc create secret docker-registry quay-auth \
+  --docker-server=quay.io \
+  --docker-username=<USERNAME> \
+  --docker-password=<PASSWORD> \
+  -n smart-mobility-dev-cpp
+
+oc secrets link pipeline quay-auth -n smart-mobility-dev-cpp
+```
+
+#### SonarQube C++ プラグインのセットアップ
+
+SonarQube Community Edition は C++ を標準サポートしていないため、[sonar-cxx](https://github.com/SonarOpenCommunity/sonar-cxx) コミュニティプラグインのインストールが必要です。
+プラグインがない場合、SonarQube はソースコードを認識できず、カバレッジデータが `Imported coverage data for 0 files` となります。
+
+**1. プラグイン永続化用の PVC を作成:**
+```bash
+oc apply -f - -n sonarqube <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sonarqube-plugins
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+```
+
+**2. SonarQube Deployment にプラグインボリュームをマウント:**
+```bash
+# SonarQubeのDeployment名を確認
+oc get deployment -n sonarqube
+
+# ボリュームとマウントを追加（Deployment名は環境に合わせて変更）
+oc patch deployment docker-sonarqube-git -n sonarqube --type=json -p '[
+  {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"plugins","persistentVolumeClaim":{"claimName":"sonarqube-plugins"}}},
+  {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"plugins","mountPath":"/opt/sonarqube/extensions/plugins"}}
+]'
+
+# Pod が再起動するまで待機
+oc rollout status deployment/docker-sonarqube-git -n sonarqube --timeout=120s
+```
+
+**3. sonar-cxx プラグイン JAR をコピー:**
+```bash
+# sonar-cxx の最新リリースを取得（SonarQubeバージョンに合ったものを選択）
+# https://github.com/SonarOpenCommunity/sonar-cxx/releases
+curl -L -o /tmp/sonar-cxx-plugin.jar \
+  "https://github.com/SonarOpenCommunity/sonar-cxx/releases/download/cxx-2.3.0/sonar-cxx-plugin-2.3.0.1445.jar"
+
+# SonarQube Pod にコピー
+SONAR_POD=$(oc get pods -n sonarqube -l app=docker-sonarqube-git -o jsonpath='{.items[0].metadata.name}')
+oc cp /tmp/sonar-cxx-plugin.jar ${SONAR_POD}:/opt/sonarqube/extensions/plugins/ -n sonarqube
+
+# SonarQube を再起動してプラグインを読み込み
+oc rollout restart deployment/docker-sonarqube-git -n sonarqube
+oc rollout status deployment/docker-sonarqube-git -n sonarqube --timeout=120s
+```
+
+**4. プラグインのインストール確認:**
+```bash
+# インストール済みプラグイン一覧を確認
+curl -s -u admin:<SONAR_PASSWORD> \
+  "http://docker-sonarqube-git.sonarqube.svc.cluster.local:9000/api/plugins/installed" | \
+  python3 -c "import json,sys; [print(f'  {p[\"name\"]} v{p[\"version\"]}') for p in json.load(sys.stdin).get('plugins',[])]"
+
+# 「C++ (Community)」が表示されれば成功
+```
+
+> **注意:** PVC を使わずに `oc cp` だけでプラグインを配置した場合、Pod の再起動でプラグインが消失します。必ず PVC をマウントしてください。
+
+#### C++ カバレッジの仕組み
+
+CIパイプラインでは `gcov` / `gcovr` を使って C++ のテストカバレッジを計測し、SonarQube に連携しています。
+
+```
+cmake (Debug + Coverage) → テスト実行 → gcovr → coverage.xml → SonarQube
+```
+
+| 項目 | 値 |
+|------|-----|
+| カバレッジツール | gcov (GCC内蔵) + gcovr (レポート生成) |
+| CMakeフラグ | `-DENABLE_COVERAGE=ON` (`--coverage -fprofile-arcs -ftest-coverage`) |
+| レポート形式 | SonarQube Generic Coverage Format (`--sonarqube`) |
+| SonarQube パラメータ | `sonar.coverageReportPaths=coverage.xml` |
+
+> **C++ 固有の考慮事項:** GCC の gcov はコンパイラが生成する例外処理パス（RAII/スタック巻き戻し）をブランチとしてカウントするため、通常のテストではカバー不可能なブランチが多数報告されます。パイプラインでは `--exclude-throw-branches` フラグの使用と、ブランチデータの除外処理により、行カバレッジのみを SonarQube に報告しています。
+
+#### その他の前提
+
+| 項目 | 説明 |
+|------|------|
+| ビルド用イメージ | `image-registry.openshift-image-registry.svc:5000/cluster-admin-devspaces/udi-cpp-dev:latest` が利用可能であること |
+| SonarQube | `http://docker-sonarqube-git.sonarqube.svc.cluster.local:9000` でアクセス可能であること（C++プラグイン導入済み） |
+| GitHub Webhook | ソースリポジトリのWebhook設定で、EventListenerのRouteURLとシークレットを登録すること |
+
+### パイプライン構成
+
+| パイプライン | 説明 |
+|-------------|------|
+| `backend-ci-pipeline-cpp` | CMakeビルド、単体テスト、カバレッジ取得、SonarQube静的解析、コンテナイメージビルド・プッシュ |
+| `e2e-and-pr-pipeline` | ArgoCD sync後のE2Eテスト実行、成功時にdevelop→mainへのPR自動作成 |
+
+### CI パイプライン（GitHub Push トリガー）
+
+GitHub Webhookからのpushイベントで自動起動します。
+
+```
+GitHub Push → EventListener → TriggerBinding → TriggerTemplate → PipelineRun
+                                                                    ↓
+                                                              git-clone
+                                                                    ↓
+                                                          cmake-build-and-test
+                                                                    ↓
+                                                            sonarqube-scan
+                                                                    ↓
+                                                              buildah (イメージビルド)
+                                                                    ↓
+                                                            skopeo-copy (外部レジストリ)
+```
+
+セットアップ:
+```bash
+oc apply -f tekton/event-listener-cpp.yaml
+oc apply -f tekton/trigger-binding-cpp.yaml
+oc apply -f tekton/trigger-template-cpp.yaml
+oc apply -f tekton/backend-ci-pipeline-cpp.yaml
+```
+
+### E2E + PR パイプライン（ArgoCD Sync トリガー）
+
+ArgoCD syncの完了通知で自動起動し、E2Eテスト成功後にdevelop→mainへのPRを作成します。
+
+```
+ArgoCD Sync通知 → EventListener → TriggerBinding → TriggerTemplate → PipelineRun
+                                                                        ↓
+                                                                  wait-for-app
+                                                                        ↓
+                                                                  git-clone-e2e
+                                                                        ↓
+                                                                  run-e2e-tests
+                                                                        ↓
+                                                                  create-pr (develop→main)
+```
+
+セットアップ:
+```bash
+oc apply -f tekton/e2e-event-listener.yaml
+oc apply -f tekton/e2e-trigger-binding.yaml
+oc apply -f tekton/e2e-trigger-template.yaml
+oc apply -f tekton/e2e-and-pr-pipeline.yaml
+```
+
+### 全Tektonリソースの一括適用
+
+```bash
+oc apply -f tekton/
+```
+
+---
+
 ## イメージレジストリ
 
 デフォルトでは以下のイメージを使用します:
 - `image-registry.openshift-image-registry.svc:5000/smart-mobility-dev-cpp/smart-mobility-backend-cpp`
 
 外部レジストリ（Quay.io）を使用する場合:
-- `quay.io/rh_ee_kmotojim/smart-mobility-backend-cpp`
+- `quay.io/example_kmotojim/smart-mobility-backend-cpp`
 
 本番環境で外部レジストリを使用する場合、`overlays/prod/kustomization.yaml` を編集してください。
